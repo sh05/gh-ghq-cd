@@ -414,11 +414,13 @@ impl Multiplexer for HerdrClient {
 
     fn send_keys(&self, keys: &str) -> Result<()> {
         let runner = SystemCommandRunner;
+        // Only the pane created by the preceding new_window/new_pane call is
+        // a valid target; falling back to HERDR_PANE_ID would silently run
+        // the command in the pane the user is sitting in.
         let target = self
             .last_target_pane
             .take()
-            .or_else(|| self.pane_id.clone())
-            .context("no target pane available to send keys to")?;
+            .context("send_keys called without a preceding new_window/new_pane")?;
         runner.run("herdr", &["pane", "run", &target, keys])?;
         Ok(())
     }
