@@ -294,8 +294,13 @@ impl Multiplexer for HerdrClient {
                 "--focus",
             ],
         )?;
-        let initial_pane_id = herdr_response_str(&output, "/result/pane/pane_id")
-            .context("herdr workspace create did not return a pane_id")?;
+        // The workspace_created response carries only workspace metadata (no
+        // pane_id), so look up the new workspace's initial pane separately.
+        let workspace_id = herdr_response_str(&output, "/result/workspace/workspace_id")
+            .context("herdr workspace create did not return a workspace_id")?;
+        let output = runner.run("herdr", &["pane", "list", "--workspace", &workspace_id])?;
+        let initial_pane_id = herdr_response_str(&output, "/result/panes/0/pane_id")
+            .context("herdr pane list did not return the new workspace's pane")?;
 
         runner.run("herdr", &["pane", "rename", &initial_pane_id, &cfg.name])?;
 
