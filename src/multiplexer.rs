@@ -1,7 +1,7 @@
 use std::cell::Cell;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::command::{CommandRunner, SystemCommandRunner};
 use crate::environment::Environment;
@@ -48,18 +48,19 @@ impl HerdrClient {
 
 pub struct NoopClient;
 
-/// Extracts a string field's value from a JSON response by scanning for
-/// `"field":"value"` (with an optional space after the colon), without
-/// pulling in a full JSON parser dependency.
-fn extract_json_field(json: &str, field: &str) -> Option<String> {
-    let key_pattern = format!("\"{field}\"");
-    let key_start = json.find(&key_pattern)?;
-    let after_key = &json[key_start + key_pattern.len()..];
-    let after_colon = after_key.trim_start().strip_prefix(':')?;
-    let after_colon = after_colon.trim_start();
-    let value_start = after_colon.strip_prefix('"')?;
-    let value_end = value_start.find('"')?;
-    Some(value_start[..value_end].to_string())
+/// Extracts a non-empty string from a herdr CLI JSON response at the given
+/// JSON Pointer (herdr wraps every payload as `{"id":...,"result":{...}}`).
+fn herdr_response_str(output: &str, pointer: &str) -> Result<String> {
+    let value: serde_json::Value =
+        serde_json::from_str(output).context("failed to parse herdr output as JSON")?;
+    let field = value
+        .pointer(pointer)
+        .and_then(|v| v.as_str())
+        .with_context(|| format!("herdr output has no string value at {pointer}"))?;
+    if field.is_empty() {
+        bail!("herdr output has an empty value at {pointer}");
+    }
+    Ok(field.to_string())
 }
 
 impl Multiplexer for TmuxClient {
@@ -293,7 +294,7 @@ impl Multiplexer for HerdrClient {
                 "--focus",
             ],
         )?;
-        let initial_pane_id = extract_json_field(&output, "pane_id")
+        let initial_pane_id = herdr_response_str(&output, "/result/pane/pane_id")
             .context("herdr workspace create did not return a pane_id")?;
 
         runner.run("herdr", &["pane", "rename", &initial_pane_id, &cfg.name])?;
@@ -322,7 +323,7 @@ impl Multiplexer for HerdrClient {
                     "--no-focus",
                 ],
             )?;
-            let second_pane_id = extract_json_field(&output, "pane_id")
+            let second_pane_id = herdr_response_str(&output, "/result/pane/pane_id")
                 .context("herdr pane split did not return a pane_id")?;
             runner.run("herdr", &["pane", "rename", &second_pane_id, &cfg.name])?;
         }
@@ -371,7 +372,7 @@ impl Multiplexer for HerdrClient {
                 "--focus",
             ],
         )?;
-        let pane_a = extract_json_field(&output, "pane_id")
+        let pane_a = herdr_response_str(&output, "/result/pane/pane_id")
             .context("herdr pane split did not return a pane_id")?;
         runner.run("herdr", &["pane", "rename", &pane_a, &cfg.name])?;
 
@@ -393,7 +394,7 @@ impl Multiplexer for HerdrClient {
                     "--no-focus",
                 ],
             )?;
-            let pane_b = extract_json_field(&output, "pane_id")
+            let pane_b = herdr_response_str(&output, "/result/pane/pane_id")
                 .context("herdr pane split did not return a pane_id")?;
             runner.run("herdr", &["pane", "rename", &pane_b, &cfg.name])?;
         }
@@ -433,41 +434,46 @@ mod tests {
     use super::*;
 
     #[test]
-    fn extract_json_field_no_space_after_colon() {
-        let json = r#"{"pane_id":"pane-123","tab_id":"tab-456"}"#;
+    fn herdr_response_str_extracts_pane_id_from_split_response() {
+        let json = r#"{"id":"cli:pane:split","result":{"type":"pane_created","pane":{"cwd":"/tmp","focused":false,"pane_id":"w8:p2","tab_id":"w8:t1","workspace_id":"w8"}}}"#;
         assert_eq!(
-            extract_json_field(json, "pane_id"),
-            Some("pane-123".to_string())
+            herdr_response_str(json, "/result/pane/pane_id").unwrap(),
+            "w8:p2"
         );
     }
 
     #[test]
-    fn extract_json_field_space_after_colon() {
-        let json = r#"{"pane_id": "pane-123", "tab_id": "tab-456"}"#;
+    fn herdr_response_str_extracts_from_array() {
+        let json = r#"{"id":"cli:pane:list","result":{"panes":[{"pane_id":"w8:p1","workspace_id":"w8"}],"type":"pane_list"}}"#;
         assert_eq!(
-            extract_json_field(json, "pane_id"),
-            Some("pane-123".to_string())
+            herdr_response_str(json, "/result/panes/0/pane_id").unwrap(),
+            "w8:p1"
         );
     }
 
     #[test]
-    fn extract_json_field_missing_field_returns_none() {
-        let json = r#"{"tab_id":"tab-456"}"#;
-        assert_eq!(extract_json_field(json, "pane_id"), None);
+    fn herdr_response_str_missing_field_errors() {
+        let json = r#"{"id":"cli:workspace:create","result":{"type":"workspace_created","workspace":{"workspace_id":"w9"}}}"#;
+        assert!(herdr_response_str(json, "/result/pane/pane_id").is_err());
     }
 
     #[test]
-    fn extract_json_field_empty_value() {
-        let json = r#"{"pane_id":""}"#;
-        assert_eq!(extract_json_field(json, "pane_id"), Some(String::new()));
+    fn herdr_response_str_empty_value_errors() {
+        let json = r#"{"result":{"pane":{"pane_id":""}}}"#;
+        assert!(herdr_response_str(json, "/result/pane/pane_id").is_err());
     }
 
     #[test]
-    fn extract_json_field_with_trailing_content() {
-        let json = r#"{"tab_id":"tab-456","pane_id":"pane-123","workspace_id":"ws-1"}"#;
+    fn herdr_response_str_invalid_json_errors() {
+        assert!(herdr_response_str("not json", "/result/pane/pane_id").is_err());
+    }
+
+    #[test]
+    fn herdr_response_str_handles_escaped_quotes_in_other_fields() {
+        let json = r#"{"result":{"pane":{"cwd":"/tmp/say \"hi\"","label":"pane_id","pane_id":"w8:p3"}}}"#;
         assert_eq!(
-            extract_json_field(json, "pane_id"),
-            Some("pane-123".to_string())
+            herdr_response_str(json, "/result/pane/pane_id").unwrap(),
+            "w8:p3"
         );
     }
 }
