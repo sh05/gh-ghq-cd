@@ -2,6 +2,7 @@ use std::cell::Cell;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
+use owo_colors::OwoColorize;
 
 use crate::command::{CommandRunner, SystemCommandRunner};
 use crate::environment::Environment;
@@ -337,13 +338,18 @@ impl Multiplexer for HerdrClient {
     }
 
     fn rename_window(&self, name: &str) -> Result<()> {
-        let runner = SystemCommandRunner;
         // A "window" maps to a Herdr workspace (see new_window), so renaming
-        // it renames the current workspace, not the current tab.
-        let workspace_id = self
-            .workspace_id
-            .as_deref()
-            .context("HERDR_WORKSPACE_ID is not set; are you running inside a Herdr pane?")?;
+        // it renames the current workspace, not the current tab. The rename
+        // is cosmetic: without HERDR_WORKSPACE_ID, warn and carry on instead
+        // of aborting the command (tmux/zellij renames cannot fail this way).
+        let Some(workspace_id) = self.workspace_id.as_deref() else {
+            eprintln!(
+                "{}: HERDR_WORKSPACE_ID is not set; skipping workspace rename",
+                "warning".yellow().bold()
+            );
+            return Ok(());
+        };
+        let runner = SystemCommandRunner;
         runner.run("herdr", &["workspace", "rename", workspace_id, name])?;
         Ok(())
     }
@@ -354,10 +360,9 @@ impl Multiplexer for HerdrClient {
             .start_dir
             .to_str()
             .context("repository path contains invalid UTF-8")?;
-        let source_pane_id = self
-            .pane_id
-            .as_deref()
-            .context("HERDR_PANE_ID is not set; are you running inside a Herdr pane?")?;
+        // The split source slot accepts either a pane id or the --current
+        // flag; fall back to the focused pane when HERDR_PANE_ID is missing.
+        let source_pane_id = self.pane_id.as_deref().unwrap_or("--current");
 
         // Primary split direction (inverted vs new_window, matching the
         // existing Tmux/Zellij clients):
