@@ -316,13 +316,11 @@ impl Multiplexer for HerdrClient {
                 "--focus",
             ],
         )?;
-        // The workspace_created response carries only workspace metadata (no
-        // pane_id), so look up the new workspace's initial pane separately.
-        let workspace_id = herdr_response_str(&output, "/result/workspace/workspace_id")
-            .context("herdr workspace create did not return a workspace_id")?;
-        let output = runner.run("herdr", &["pane", "list", "--workspace", &workspace_id])?;
-        let initial_pane_id = herdr_response_str(&output, "/result/panes/0/pane_id")
-            .context("herdr pane list did not return the new workspace's pane")?;
+        // The create response reports the workspace's initial pane as
+        // root_pane (verified against a live herdr; the published API schema
+        // omits this field).
+        let initial_pane_id = herdr_response_str(&output, "/result/root_pane/pane_id")
+            .context("herdr workspace create did not return a root pane")?;
 
         runner.run("herdr", &["pane", "rename", &initial_pane_id, &cfg.name])?;
 
@@ -449,18 +447,18 @@ mod tests {
     }
 
     #[test]
-    fn herdr_response_str_extracts_from_array() {
-        let json = r#"{"id":"cli:pane:list","result":{"panes":[{"pane_id":"w8:p1","workspace_id":"w8"}],"type":"pane_list"}}"#;
+    fn herdr_response_str_extracts_root_pane_from_create_response() {
+        let json = r#"{"id":"cli:workspace:create","result":{"root_pane":{"cwd":"/tmp","pane_id":"wC:p1","tab_id":"wC:t1","workspace_id":"wC"},"tab":{"tab_id":"wC:t1"},"type":"workspace_created","workspace":{"label":"repo","workspace_id":"wC"}}}"#;
         assert_eq!(
-            herdr_response_str(json, "/result/panes/0/pane_id").unwrap(),
-            "w8:p1"
+            herdr_response_str(json, "/result/root_pane/pane_id").unwrap(),
+            "wC:p1"
         );
     }
 
     #[test]
     fn herdr_response_str_missing_field_errors() {
         let json = r#"{"id":"cli:workspace:create","result":{"type":"workspace_created","workspace":{"workspace_id":"w9"}}}"#;
-        assert!(herdr_response_str(json, "/result/pane/pane_id").is_err());
+        assert!(herdr_response_str(json, "/result/root_pane/pane_id").is_err());
     }
 
     #[test]
