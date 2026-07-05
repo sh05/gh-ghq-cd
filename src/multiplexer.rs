@@ -19,6 +19,12 @@ impl WindowConfig {
             start_dir: start_dir.into(),
         }
     }
+
+    fn start_dir_str(&self) -> Result<&str> {
+        self.start_dir
+            .to_str()
+            .context("repository path contains invalid UTF-8")
+    }
 }
 
 pub trait Multiplexer {
@@ -45,6 +51,36 @@ impl HerdrClient {
             last_target_pane: Cell::new(None),
         }
     }
+
+    /// Splits `source_pane` and names the resulting pane, returning its id.
+    fn split_and_rename(
+        &self,
+        runner: &SystemCommandRunner,
+        source_pane: &str,
+        direction: &str,
+        start_dir: &str,
+        name: &str,
+        focus: bool,
+    ) -> Result<String> {
+        let focus_flag = if focus { "--focus" } else { "--no-focus" };
+        let output = runner.run(
+            "herdr",
+            &[
+                "pane",
+                "split",
+                source_pane,
+                "--direction",
+                direction,
+                "--cwd",
+                start_dir,
+                focus_flag,
+            ],
+        )?;
+        let pane_id = herdr_response_str(&output, "/result/pane/pane_id")
+            .context("herdr pane split did not return a pane_id")?;
+        runner.run("herdr", &["pane", "rename", &pane_id, name])?;
+        Ok(pane_id)
+    }
 }
 
 pub struct NoopClient;
@@ -67,10 +103,7 @@ fn herdr_response_str(output: &str, pointer: &str) -> Result<String> {
 impl Multiplexer for TmuxClient {
     fn new_window(&self, cfg: &WindowConfig, pane_count: u8, horizontal: bool) -> Result<()> {
         let runner = SystemCommandRunner;
-        let start_dir = cfg
-            .start_dir
-            .to_str()
-            .context("repository path contains invalid UTF-8")?;
+        let start_dir = cfg.start_dir_str()?;
 
         runner.run("tmux", &["new-window", "-n", &cfg.name, "-c", start_dir])?;
 
@@ -111,10 +144,7 @@ impl Multiplexer for TmuxClient {
 
     fn new_pane(&self, cfg: &WindowConfig, pane_count: u8, horizontal: bool) -> Result<()> {
         let runner = SystemCommandRunner;
-        let start_dir = cfg
-            .start_dir
-            .to_str()
-            .context("repository path contains invalid UTF-8")?;
+        let start_dir = cfg.start_dir_str()?;
 
         // Primary split direction:
         // - vertical (default): -hf (horizontal split with full height, creates left/right)
@@ -162,10 +192,7 @@ impl Multiplexer for TmuxClient {
 impl Multiplexer for ZellijClient {
     fn new_window(&self, cfg: &WindowConfig, pane_count: u8, horizontal: bool) -> Result<()> {
         let runner = SystemCommandRunner;
-        let start_dir = cfg
-            .start_dir
-            .to_str()
-            .context("repository path contains invalid UTF-8")?;
+        let start_dir = cfg.start_dir_str()?;
 
         runner.run(
             "zellij",
@@ -212,10 +239,7 @@ impl Multiplexer for ZellijClient {
 
     fn new_pane(&self, cfg: &WindowConfig, pane_count: u8, horizontal: bool) -> Result<()> {
         let runner = SystemCommandRunner;
-        let start_dir = cfg
-            .start_dir
-            .to_str()
-            .context("repository path contains invalid UTF-8")?;
+        let start_dir = cfg.start_dir_str()?;
 
         // Primary split direction:
         // - vertical (default): right (split left/right)
@@ -275,10 +299,7 @@ impl Multiplexer for ZellijClient {
 impl Multiplexer for HerdrClient {
     fn new_window(&self, cfg: &WindowConfig, pane_count: u8, horizontal: bool) -> Result<()> {
         let runner = SystemCommandRunner;
-        let start_dir = cfg
-            .start_dir
-            .to_str()
-            .context("repository path contains invalid UTF-8")?;
+        let start_dir = cfg.start_dir_str()?;
 
         // Herdr's own convention is one workspace per repo/task/investigation
         // (tabs are for different views *within* the same project), so a new
@@ -314,24 +335,16 @@ impl Multiplexer for HerdrClient {
             // - vertical (default): down (split top/bottom)
             // - horizontal: right (split left/right)
             let direction = if horizontal { "right" } else { "down" };
-            // Keep focus on the initial pane, mirroring tmux/zellij's
-            // "return focus to first pane" end state.
-            let output = runner.run(
-                "herdr",
-                &[
-                    "pane",
-                    "split",
-                    &initial_pane_id,
-                    "--direction",
-                    direction,
-                    "--cwd",
-                    start_dir,
-                    "--no-focus",
-                ],
+            // Keep focus on the initial pane (focus: false), mirroring
+            // tmux/zellij's "return focus to first pane" end state.
+            self.split_and_rename(
+                &runner,
+                &initial_pane_id,
+                direction,
+                start_dir,
+                &cfg.name,
+                false,
             )?;
-            let second_pane_id = herdr_response_str(&output, "/result/pane/pane_id")
-                .context("herdr pane split did not return a pane_id")?;
-            runner.run("herdr", &["pane", "rename", &second_pane_id, &cfg.name])?;
         }
 
         Ok(())
@@ -356,10 +369,7 @@ impl Multiplexer for HerdrClient {
 
     fn new_pane(&self, cfg: &WindowConfig, pane_count: u8, horizontal: bool) -> Result<()> {
         let runner = SystemCommandRunner;
-        let start_dir = cfg
-            .start_dir
-            .to_str()
-            .context("repository path contains invalid UTF-8")?;
+        let start_dir = cfg.start_dir_str()?;
         // The split source slot accepts either a pane id or the --current
         // flag; fall back to the focused pane when HERDR_PANE_ID is missing.
         let source_pane_id = self.pane_id.as_deref().unwrap_or("--current");
@@ -369,44 +379,28 @@ impl Multiplexer for HerdrClient {
         // - vertical (default): right (split left/right)
         // - horizontal: down (split top/bottom)
         let primary_direction = if horizontal { "down" } else { "right" };
-        let output = runner.run(
-            "herdr",
-            &[
-                "pane",
-                "split",
-                source_pane_id,
-                "--direction",
-                primary_direction,
-                "--cwd",
-                start_dir,
-                "--focus",
-            ],
+        let pane_a = self.split_and_rename(
+            &runner,
+            source_pane_id,
+            primary_direction,
+            start_dir,
+            &cfg.name,
+            true,
         )?;
-        let pane_a = herdr_response_str(&output, "/result/pane/pane_id")
-            .context("herdr pane split did not return a pane_id")?;
-        runner.run("herdr", &["pane", "rename", &pane_a, &cfg.name])?;
 
         self.last_target_pane.set(Some(pane_a.clone()));
 
         if pane_count >= 2 {
             // Secondary split (perpendicular to primary):
             let secondary_direction = if horizontal { "right" } else { "down" };
-            let output = runner.run(
-                "herdr",
-                &[
-                    "pane",
-                    "split",
-                    &pane_a,
-                    "--direction",
-                    secondary_direction,
-                    "--cwd",
-                    start_dir,
-                    "--no-focus",
-                ],
+            self.split_and_rename(
+                &runner,
+                &pane_a,
+                secondary_direction,
+                start_dir,
+                &cfg.name,
+                false,
             )?;
-            let pane_b = herdr_response_str(&output, "/result/pane/pane_id")
-                .context("herdr pane split did not return a pane_id")?;
-            runner.run("herdr", &["pane", "rename", &pane_b, &cfg.name])?;
         }
 
         Ok(())
