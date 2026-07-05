@@ -5,7 +5,9 @@ use std::path::Path;
 
 use crate::command::{CommandChecker, CommandRunner, SystemCommandChecker, SystemCommandRunner};
 use crate::environment::{Environment, SystemEnvironment};
-use crate::multiplexer::{Multiplexer, NoopClient, TmuxClient, WindowConfig, ZellijClient};
+use crate::multiplexer::{
+    HerdrClient, Multiplexer, NoopClient, TmuxClient, WindowConfig, ZellijClient,
+};
 use crate::selection::select_repository;
 use crate::shell;
 
@@ -137,12 +139,17 @@ pub fn run() -> Result<()> {
     // Check if running inside a terminal multiplexer
     let use_tmux = env.var("TMUX").is_some();
     let use_zellij = env.var("ZELLIJ").is_some();
-    let use_multiplexer = use_tmux || use_zellij;
+    let use_herdr = env.var("HERDR_ENV").as_deref() == Some("1");
+    let use_multiplexer = use_tmux || use_zellij || use_herdr;
 
+    // Innermost tool wins: if tmux or zellij is running inside a Herdr pane,
+    // detect that instead of Herdr itself.
     let mux: Box<dyn Multiplexer> = if use_zellij {
         Box::new(ZellijClient)
     } else if use_tmux {
         Box::new(TmuxClient)
+    } else if use_herdr {
+        Box::new(HerdrClient::new(&env))
     } else {
         Box::new(NoopClient)
     };
