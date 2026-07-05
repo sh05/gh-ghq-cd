@@ -476,7 +476,8 @@ mod tests {
 
     #[test]
     fn herdr_response_str_handles_escaped_quotes_in_other_fields() {
-        let json = r#"{"result":{"pane":{"cwd":"/tmp/say \"hi\"","label":"pane_id","pane_id":"w8:p3"}}}"#;
+        let json =
+            r#"{"result":{"pane":{"cwd":"/tmp/say \"hi\"","label":"pane_id","pane_id":"w8:p3"}}}"#;
         assert_eq!(
             herdr_response_str(json, "/result/pane/pane_id").unwrap(),
             "w8:p3"
